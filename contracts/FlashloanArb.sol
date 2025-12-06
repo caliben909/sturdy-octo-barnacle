@@ -312,6 +312,7 @@ contract FlashloanArb is Ownable, Pausable, AccessControl, ReentrancyGuard {
         // Validate arbitrage path
         require(path.length >= 3 && path.length <= 6, "Invalid arbitrage path length");
         require(path[0] == token0 && path[path.length - 1] == token0, "Path must start and end with token0");
+        require(token == token0, "Token mismatch");
 
         // Execute triangular arbitrage: token0 -> token1 -> token -> token0
         uint initialBalance = IERC20(token).balanceOf(address(this));
@@ -405,13 +406,15 @@ contract FlashloanArb is Ownable, Pausable, AccessControl, ReentrancyGuard {
 
         // Transfer remaining profit to owner
         uint remainingProfit = finalBalance - repayAmount;
+        require(remainingProfit >= minProfit, "Profit below minimum");
         if (remainingProfit > 0) {
             IERC20(token).transfer(owner(), remainingProfit);
         }
 
         // Reimburse gas fees to caller
         if (gasReimbursement > 0 && address(this).balance >= gasReimbursement) {
-            payable(caller).transfer(gasReimbursement);
+            (bool success,) = payable(caller).call{value: gasReimbursement}("");
+            require(success, "Gas reimbursement failed");
         }
 
         emit TriArbExecuted(caller, token0, token1, token, amount, finalBalance, remainingProfit);

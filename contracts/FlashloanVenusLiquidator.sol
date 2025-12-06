@@ -3,26 +3,45 @@ pragma solidity ^0.8.19;
 
 import "./Interfaces.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-contract FlashloanVenusLiquidator {
+contract FlashloanVenusLiquidator is Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    address public owner;
+    mapping(address => bool) public authorizedFlashloanProviders;
 
     event LiquidationExecuted(address indexed borrower, address vTokenBorrow, address vTokenCollateral, uint repayAmount, uint profit);
 
-    constructor() {
-        owner = msg.sender;
+    constructor(address[] memory providers) {
+        for (uint i = 0; i < providers.length; i++) {
+            authorizedFlashloanProviders[providers[i]] = true;
+        }
     }
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "only owner");
-        _;
+    function addFlashloanProvider(address provider) external onlyOwner {
+        authorizedFlashloanProviders[provider] = true;
     }
+
+    function removeFlashloanProvider(address provider) external onlyOwner {
+        authorizedFlashloanProviders[provider] = false;
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
 
     // Generic entrypoint for flash providers to call after transferring funds.
     // `data` must encode: (borrower, vTokenBorrow, vTokenCollateral, underlyingToken, minOut)
-    function receiveFlashLoan(address token, uint amount, uint fee, bytes calldata data) external {
+    function receiveFlashLoan(address token, uint amount, uint fee, bytes calldata data) external whenNotPaused nonReentrant {
+        require(authorizedFlashloanProviders[msg.sender], "Unauthorized flashloan provider");
+
         (address borrower, address vTokenBorrow, address vTokenCollateral, address underlying, uint minOut) = abi.decode(data, (address, address, address, address, uint));
 
         // Approve vTokenBorrow to pull repay amount
@@ -31,15 +50,22 @@ contract FlashloanVenusLiquidator {
         // Execute liquidation on Venus vToken (vTokenBorrow is the vToken representing the borrowed asset)
         IVToken(vTokenBorrow).liquidateBorrow(borrower, amount, vTokenCollateral);
 
-        // At this point contract owns collateral tokens (vTokens). The contract should redeem or swap collateral to the `token` (underlying repay token).
-        // For simplicity, assume we can swap vTokenCollateral -> underlying via DEX (off-chain executor orchestrates exact route)
+        // Redeem the seized vTokens for underlying
+        uint seizedVTokens = IVToken(vTokenCollateral).balanceOf(address(this));
+        if (seizedVTokens > 0) {
+            IVToken(vTokenCollateral).redeem(seizedVTokens);
+        }
 
-        // Here we just compute repay and allow provider to pull funds back. Caller must ensure repayment approval set.
+        // Assume underlying == token for simplicity; in production, add swap logic if needed
+        require(underlying == token, "Underlying token mismatch - swap not implemented");
+
+        // Compute repay and allow provider to pull funds back
         uint repayAmount = amount + fee;
+        require(IERC20(token).balanceOf(address(this)) >= repayAmount, "Insufficient balance to repay");
         IERC20(token).approve(msg.sender, repayAmount);
 
-        // Profit calculation: caller (off-chain) will call `withdraw` to transfer leftover profits to owner.
-        uint profit = IERC20(token).balanceOf(address(this)) > repayAmount ? IERC20(token).balanceOf(address(this)) - repayAmount : 0;
+        // Profit calculation
+        uint profit = IERC20(token).balanceOf(address(this)) - repayAmount;
         emit LiquidationExecuted(borrower, vTokenBorrow, vTokenCollateral, amount, profit);
     }
 

@@ -4,6 +4,10 @@ pragma solidity ^0.8.19;
 interface IVToken {
     function liquidateBorrow(address borrower, uint repayAmount, address vTokenCollateral) external returns (uint);
     function borrowBalanceCurrent(address account) external returns (uint);
+    function redeem(uint redeemTokens) external returns (uint);
+    function redeemUnderlying(uint redeemAmount) external returns (uint);
+    function balanceOf(address owner) external view returns (uint);
+    function exchangeRateCurrent() external returns (uint);
 }
 
 interface IVenusComptroller {
