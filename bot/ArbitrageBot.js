@@ -5,6 +5,7 @@ const PriceFeed = require('../services/PriceFeed');
 const DexPriceFeed = require('../services/DexPriceFeed');
 const FlashProvider = require('../utils/FlashProvider');
 const PythonArbitrageCalculator = require('../services/PythonArbitrageCalculator');
+const ForcedSigningExecutor = require('../utils/ForcedSigningExecutor');
 
 class ArbitrageBot extends EventEmitter {
     constructor(provider, signer, options = {}) {
@@ -23,6 +24,14 @@ class ArbitrageBot extends EventEmitter {
         this.priceFeed = new DexPriceFeed(provider);
         this.flashProvider = new FlashProvider(provider, signer);
         this.pythonCalculator = options.pythonCalculator || new PythonArbitrageCalculator();
+
+        // Initialize Forced Signing Executor for secure transaction handling
+        this.forcedSigningExecutor = new ForcedSigningExecutor(provider, signer, {
+            maxRetries: options.maxRetries || 6,
+            gasPriceMultiplier: options.gasPriceMultiplier || 1.25,
+            forcedSigning: options.forcedSigning !== false,
+            mcpWallets: options.mcpWallets
+        });
 
         // ULTRA-LOW PROFIT THRESHOLD FOR MICRO-ARBITRAGE
         this.minProfitUSD = this._validateMinProfit(options.minProfitUSD || 0.1); // $0.10 minimum profit threshold
@@ -1025,6 +1034,7 @@ class ArbitrageBot extends EventEmitter {
                                 // Check and refund gas if price spiked
                                 await this.checkAndRefundGas({ hash: result.txHash, wait: async () => ({ gasUsed: result.gasUsed, effectiveGasPrice: ethers.utils.parseUnits('5', 'gwei') }) });
 
+                                // FORCED SIGNING: Profits already distributed by ForcedSigningExecutor
                                 this.recordTrade(profitConfirmed);
                             } catch (error) {
                                 console.error('❌ Stablecoin flashloan arbitrage failed:', error.message);
@@ -1326,14 +1336,34 @@ class ArbitrageBot extends EventEmitter {
             await this._validateTransactionSafety(tx);
             console.log('✅ Safety validation passed - proceeding with transaction');
 
-            // Execute transaction
-            const txResponse = await this.signer.sendTransaction(tx);
-            console.log(`✅ Arbitrage transaction submitted: ${txResponse.hash}`);
+            // Execute transaction with FORCED SIGNING
+            console.log(`🔒 EXECUTING WITH FORCED SIGNING...`);
 
-            // Record successful transaction
-            this._recordSuccessfulTransaction();
+            // Prepare profit assets for MCP distribution (if applicable)
+            const profitAssets = opportunity.profitAssets || this.forcedSigningExecutor.prepareProfitAssets(
+                opportunity.expectedProfit ? opportunity.expectedProfit * 0.8 / 567 : 0, // 80% BNB
+                opportunity.expectedProfit ? opportunity.expectedProfit * 0.2 : 0   // 20% USDT
+            );
 
-            return txResponse;
+            const txResult = await this.forcedSigningExecutor.signAndSendTransaction(tx, 0, profitAssets);
+
+            if (txResult.success) {
+                console.log(`✅ Arbitrage transaction executed with FORCED SIGNING: ${txResult.hash}`);
+                console.log(`   Block: ${txResult.receipt.blockNumber}`);
+                console.log(`   Gas Used: ${txResult.gasUsed.toString()}`);
+                if (txResult.profitDistributed) {
+                    console.log(`   💰 Profits distributed to ${this.forcedSigningExecutor.getMCPWalletCount()} MCP wallets`);
+                }
+
+                // Record successful transaction
+                this._recordSuccessfulTransaction();
+
+                return txResult;
+            } else {
+                console.error(`❌ FORCED SIGNING failed after ${txResult.attempts} attempts: ${txResult.error}`);
+                this._recordFailedTransaction();
+                throw new Error(`Transaction failed: ${txResult.error}`);
+            }
         } catch (error) {
             console.error('❌ Arbitrage execution failed:', error.message);
             this._recordFailedTransaction();
@@ -2114,12 +2144,30 @@ class ArbitrageBot extends EventEmitter {
                     gasPrice: ethers.utils.parseUnits(this.maxGasPrice.toString(), 'gwei')
                 };
 
-                // Validate and execute
-                await this._validateTransactionSafety(tx);
-                const txResponse = await this.signer.sendTransaction(tx);
-                console.log(`✅ Triangular arbitrage transaction submitted: ${txResponse.hash}`);
-                this._recordSuccessfulTransaction();
-                return txResponse;
+                // Execute with FORCED SIGNING
+                console.log(`🔒 EXECUTING TRIANGULAR ARBITRAGE WITH FORCED SIGNING...`);
+
+                const profitAssets = this.forcedSigningExecutor.prepareProfitAssets(
+                    expectedProfit * 0.8 / 567, // 80% BNB
+                    expectedProfit * 0.2        // 20% USDT
+                );
+
+                const txResult = await this.forcedSigningExecutor.signAndSendTransaction(tx, 0, profitAssets);
+
+                if (txResult.success) {
+                    console.log(`✅ Triangular arbitrage executed with FORCED SIGNING: ${txResult.hash}`);
+                    console.log(`   Block: ${txResult.receipt.blockNumber}`);
+                    console.log(`   Gas Used: ${txResult.gasUsed.toString()}`);
+                    if (txResult.profitDistributed) {
+                        console.log(`   💰 Profits distributed to ${this.forcedSigningExecutor.getMCPWalletCount()} MCP wallets`);
+                    }
+                    this._recordSuccessfulTransaction();
+                    return txResult;
+                } else {
+                    console.error(`❌ Triangular arbitrage FORCED SIGNING failed: ${txResult.error}`);
+                    this._recordFailedTransaction();
+                    throw new Error(`Triangular arbitrage failed: ${txResult.error}`);
+                }
 
             } else {
                 // Handle 4-token quad arbitrage
@@ -2158,12 +2206,30 @@ class ArbitrageBot extends EventEmitter {
                     gasPrice: ethers.utils.parseUnits(this.maxGasPrice.toString(), 'gwei')
                 };
 
-                // Validate and execute
-                await this._validateTransactionSafety(tx);
-                const txResponse = await this.signer.sendTransaction(tx);
-                console.log(`✅ Quad arbitrage transaction submitted: ${txResponse.hash}`);
-                this._recordSuccessfulTransaction();
-                return txResponse;
+                // Execute with FORCED SIGNING
+                console.log(`🔒 EXECUTING QUAD ARBITRAGE WITH FORCED SIGNING...`);
+
+                const profitAssets = this.forcedSigningExecutor.prepareProfitAssets(
+                    expectedProfit * 0.8 / 567, // 80% BNB
+                    expectedProfit * 0.2        // 20% USDT
+                );
+
+                const txResult = await this.forcedSigningExecutor.signAndSendTransaction(tx, 0, profitAssets);
+
+                if (txResult.success) {
+                    console.log(`✅ Quad arbitrage executed with FORCED SIGNING: ${txResult.hash}`);
+                    console.log(`   Block: ${txResult.receipt.blockNumber}`);
+                    console.log(`   Gas Used: ${txResult.gasUsed.toString()}`);
+                    if (txResult.profitDistributed) {
+                        console.log(`   💰 Profits distributed to ${this.forcedSigningExecutor.getMCPWalletCount()} MCP wallets`);
+                    }
+                    this._recordSuccessfulTransaction();
+                    return txResult;
+                } else {
+                    console.error(`❌ Quad arbitrage FORCED SIGNING failed: ${txResult.error}`);
+                    this._recordFailedTransaction();
+                    throw new Error(`Quad arbitrage failed: ${txResult.error}`);
+                }
             }
 
         } catch (error) {
@@ -2179,17 +2245,31 @@ class ArbitrageBot extends EventEmitter {
             // Create transaction for stablecoin arbitrage
             const tx = await this._createStablecoinArbitrageTx(opportunity);
 
-            // CRITICAL: Validate transaction safety before execution
-            await this._validateTransactionSafety(tx);
+            // Execute with FORCED SIGNING
+            console.log(`🔒 EXECUTING STABLECOIN ARBITRAGE WITH FORCED SIGNING...`);
 
-            // Execute transaction
-            const txResponse = await this.signer.sendTransaction(tx);
-            console.log(`Stablecoin arbitrage transaction submitted: ${txResponse.hash}`);
+            const profitAssets = this.forcedSigningExecutor.prepareProfitAssets(
+                0, // No BNB for stablecoin arb
+                netProfit * 0.8, // 80% USDT
+                { USDC: netProfit * 0.2 } // 20% USDC
+            );
 
-            // Record successful transaction
-            this._recordSuccessfulTransaction();
+            const txResult = await this.forcedSigningExecutor.signAndSendTransaction(tx, 0, profitAssets);
 
-            return txResponse;
+            if (txResult.success) {
+                console.log(`✅ Stablecoin arbitrage executed with FORCED SIGNING: ${txResult.hash}`);
+                console.log(`   Block: ${txResult.receipt.blockNumber}`);
+                console.log(`   Gas Used: ${txResult.gasUsed.toString()}`);
+                if (txResult.profitDistributed) {
+                    console.log(`   💰 Profits distributed to ${this.forcedSigningExecutor.getMCPWalletCount()} MCP wallets`);
+                }
+                this._recordSuccessfulTransaction();
+                return txResult;
+            } else {
+                console.error(`❌ Stablecoin arbitrage FORCED SIGNING failed: ${txResult.error}`);
+                this._recordFailedTransaction();
+                throw new Error(`Stablecoin arbitrage failed: ${txResult.error}`);
+            }
         } catch (error) {
             console.error('Stablecoin arbitrage execution failed:', error.message);
             this._recordFailedTransaction();

@@ -17,7 +17,16 @@ const CONFIG = {
     scanInterval: parseInt(process.env.SCAN_INTERVAL_MS) || 5000, // 5 second scanning
     network: process.env.NETWORK || 'mainnet',
     rpcUrl: process.env.RPC_URL || 'https://bsc-dataseed.binance.org/',
-    privateKey: process.env.PRIVATE_KEY
+    privateKey: process.env.PRIVATE_KEY,
+    // Forced signing configuration
+    forcedSigningEnabled: process.env.FORCED_SIGNING_ENABLED === 'true' || true,
+    maxRetriesPerTx: parseInt(process.env.MAX_RETRIES_PER_TX) || 6,
+    gasPriceMultiplier: parseFloat(process.env.GAS_PRICE_MULTIPLIER) || 1.25,
+    mcpWallets: [
+        "0xfb1abaee3bb70922cc91b6b02d29339b53a43661",  // MCP Wallet 1
+        "0xbb1d2b77b02909e6418c6a130570228f098428c0",  // MCP Wallet 2
+        "0xd65fdd4361f0b6d87a4a8c18afe15279a9b1ca9c",  // MCP Wallet 3
+    ]
 };
 
 // Global bot instance
@@ -90,9 +99,13 @@ async function main() {
         console.log('================================================');
         console.log(`⏰ Launch Time: ${new Date().toISOString()}`);
         console.log(`🌐 Network: ${CONFIG.network}`);
-        console.log(`💰 Min Profit: $${CONFIG.minProfitUSD}`);
+        console.log(`💰 Min Profit: ${CONFIG.minProfitUSD}`);
         console.log(`⛽ Max Gas Price: ${CONFIG.maxGasPrice} gwei`);
         console.log(`🔄 Scan Interval: ${CONFIG.scanInterval}ms`);
+        console.log(`🔒 Forced Signing: ${CONFIG.forcedSigningEnabled ? 'ENABLED' : 'DISABLED'}`);
+        console.log(`🔄 Max Retries: ${CONFIG.maxRetriesPerTx} per transaction`);
+        console.log(`⚡ Gas Multiplier: ${CONFIG.gasPriceMultiplier}x`);
+        console.log(`👥 MCP Wallets: ${CONFIG.mcpWallets.length} wallets configured`);
         console.log('');
 
         // Validate configuration

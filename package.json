@@ -1,50 +1,14 @@
 {
-  "name": "bsc-venus-liquidator-pro",
-  "version": "1.0.0",
-  "private": true,
+  "name": "ultraflash-bsc-nuclear",
+  "version": "2.0.0",
+  "type": "module",
   "scripts": {
-    "compile": "npx hardhat compile",
-    "test": "npx hardhat test --config hardhat.config.cjs",
-    "test:calculator": "node test_arbitrage_calculator.js",
-    "run:calculator": "arbitrage_env\\Scripts\\python.exe services/ArbitrageCalculator.py",
-    "run:calculator:once": "arbitrage_env\\Scripts\\python.exe services/ArbitrageCalculator.py --once",
-    "run:auto": "arbitrage_env\\Scripts\\python.exe self_discover_hybrid_bot.py",
-    "run:auto:tri": "arbitrage_env\\Scripts\\python.exe self_discover_hybrid_bot.py --mode tri",
-    "run:auto:liq": "arbitrage_env\\Scripts\\python.exe self_discover_hybrid_bot.py --mode liq",
-    "run:auto:hybrid": "arbitrage_env\\Scripts\\python.exe self_discover_hybrid_bot.py --mode hybrid",
-    
-    "run:printer": "python final_printer_2025.py",
-    
-    "run:ai": "node -e \"console.log('AI-Powered Arbitrage Bot Starting...'); require('./ai/mev_protector').aiMEVProtector.initialize().then(() => console.log('AI Ready!')).catch(console.error);\" && npm run run:printer",
-    "lint": "eslint . --ext .js"
-  },
-  "devDependencies": {
-    "@nomicfoundation/hardhat-chai-matchers": "^2.0.0",
-    "@nomicfoundation/hardhat-ethers": "^3.0.0",
-    "@nomicfoundation/hardhat-network-helpers": "^1.1.0",
-    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
-    "@nomicfoundation/hardhat-verify": "^2.0.0",
-    "@typechain/ethers-v6": "^0.5.0",
-    "@typechain/hardhat": "^9.0.0",
-    "@types/chai": "^4.3.0",
-    "@types/mocha": "^10.0.0",
-    "chai": "^4.3.0",
-    "eslint": "^8.0.0",
-    "hardhat": "^2.19.0",
-    "hardhat-gas-reporter": "^1.0.0",
-    "sinon": "^17.0.0",
-    "solidity-coverage": "^0.8.0",
-    "ts-node": "^10.9.0",
-    "typechain": "^8.3.0",
-    "typescript": "^5.0.0"
+    "start": "node run.js"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^4.9.0",
-    "axios": "^1.13.2",
-    "dotenv": "^16.6.1",
-    "ethers": "^6.13.0",
-    "moralis": "^2.26.1",
-    "telegraf": "^4.12.0",
-    "web3": "^1.10.0"
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.12.1",
+    "node-telegram-bot-api": "^0.64.0"
   }
 }

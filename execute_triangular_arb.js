@@ -1,287 +1,343 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 
 /**
- * TRIANGULAR ARBITRAGE EXECUTOR
- * Executes profitable triangular arbitrage opportunities found by the scanner
+ * EXECUTE TRIANGULAR ARBITRAGE WITH FORCED SIGNING
+ * Enhanced version with forced transaction signing and profit distribution
  */
 
 const { ethers } = require('ethers');
-const { TOKENS, DEX_CONFIGS } = require('./config/dex');
-require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 
 // Configuration
-const CONFIG = {
-    minProfitUSD: 10, // Minimum $10 profit to execute
-    maxGasPrice: 20, // Maximum 20 gwei
-    flashloanContract: process.env.FLASHLOAN_ARB_CONTRACT || '0xf682bd44ca1Fb8184e359A8aF9E1732afD29BBE1',
-    rpcUrl: process.env.RPC_URL || 'https://bsc-dataseed.binance.org/',
-    privateKey: process.env.PRIVATE_KEY
+require('dotenv').config();
+
+// Get and validate environment variables
+const getEnvVar = (key, defaultValue = null, required = false) => {
+    const value = process.env[key] || defaultValue;
+    if (required && !value) {
+        console.error(`âŒ Required environment variable ${key} is not set`);
+        process.exit(1);
+    }
+    return value;
 };
 
-// Flashloan contract ABI (simplified)
-const FLASHLOAN_ABI = [
-    "function executeTriArb(address tokenA, address tokenB, address tokenC, uint256 amountIn, string memory router1Name, string memory router2Name, string memory router3Name, uint256 minReturnA, uint256 deadline) external onlyOwner returns (uint256 finalAmountA, uint256 profit)"
-];
+const CONFIG = {
+    rpcUrl: getEnvVar('RPC_URL', 'https://bsc-dataseed.binance.org/'),
+    privateKey: getEnvVar('PRIVATE_KEY', null, true), // Required
+    contractAddress: getEnvVar('FLASHLOAN_ARB_CONTRACT', '0xf682bd44ca1Fb8184e359A8aF9E1732afD29BBE1'),
+    walletAddress: getEnvVar('WALLET_ADDRESS', null, true), // Required
+    forcedSigning: process.argv.includes('--forced-signing') || process.env.FORCED_SIGNING === 'true',
+    maxRetries: parseInt(process.env.MAX_RETRIES_PER_TX) || 6,
+    gasPriceMultiplier: parseFloat(process.env.GAS_PRICE_MULTIPLIER) || 1.25
+};
 
-// Router ABI for triangular arbitrage
-const ROUTER_ABI = [
-    "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)",
-    "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)"
-];
+// Token addresses
+const TOKENS = {
+    WBNB: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+    CAKE: "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82",
+    BTCB: "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c",
+    ETH: "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
+    USDT: "0x55d398326f99059fF775485246999027b3197955",
+    USDC: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+    BUSD: "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56",
+    DAI: "0x1AF3F329e8BE154074D8769D1FFa4eEE058B1DBc3"
+};
 
-class TriangularArbitrageExecutor {
+// PancakeSwap V2 Router
+const PANCAKE_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
+
+// Initialize provider and wallet
+const provider = new ethers.JsonRpcProvider(CONFIG.rpcUrl);
+
+// Fix address checksum by ensuring proper formatting
+const normalizedAddress = ethers.utils.getAddress(CONFIG.walletAddress);
+const wallet = new ethers.Wallet(CONFIG.privateKey, provider);
+
+// Verify the address matches expected
+if (wallet.address.toLowerCase() !== normalizedAddress.toLowerCase()) {
+    console.log(`âš ï¸  Address format warning: wallet ${wallet.address} vs expected ${normalizedAddress}`);
+    // Continue anyway as ethers will handle the checksum
+}
+
+console.log('ðŸš€ TRIANGULAR ARBITRAGE EXECUTOR WITH FORCED SIGNING');
+console.log('==================================================');
+console.log(`ðŸ”— Network: ${CONFIG.rpcUrl}`);
+console.log(`ðŸ‘¤ Wallet: ${CONFIG.walletAddress}`);
+console.log(`ðŸ”’ Forced Signing: ${CONFIG.forcedSigning ? 'ENABLED' : 'DISABLED'}`);
+console.log(`ðŸ”„ Max Retries: ${CONFIG.maxRetries}`);
+console.log(`âš¡ Gas Multiplier: ${CONFIG.gasPriceMultiplier}x`);
+console.log('');
+
+class ForcedSigningExecutor {
     constructor() {
-        if (!CONFIG.privateKey) {
-            throw new Error('PRIVATE_KEY not found in environment');
+        this.provider = provider;
+        this.wallet = wallet;
+        this.pendingTxs = new Map();
+        this.nonce = null;
+    }
+
+    async getPendingNonce() {
+        return await this.provider.getTransactionCount(this.wallet.address, 'pending');
+    }
+
+    async signAndSendTransaction(tx, retryCount = 0) {
+        try {
+            // Set nonce
+            tx.nonce = tx.nonce || await this.getPendingNonce();
+            
+            // Estimate gas
+            tx.gasLimit = tx.gasLimit || await this.provider.estimateGas(tx);
+            
+            // Set gas price with multiplier for forced signing
+            const gasPrice = await this.provider.getGasPrice();
+            tx.gasPrice = CONFIG.forcedSigning ? 
+                gasPrice.mul(Math.floor(CONFIG.gasPriceMultiplier * 1000)).div(1000) :
+                gasPrice;
+
+            console.log(`ðŸ“¤ Transaction attempt ${retryCount + 1}:`);
+            console.log(`   To: ${tx.to}`);
+            console.log(`   Gas: ${tx.gasLimit.toString()}`);
+            console.log(`   Gas Price: ${ethers.utils.formatUnits(tx.gasPrice, 'gwei')} gwei`);
+            console.log(`   Nonce: ${tx.nonce}`);
+
+            // Sign and send transaction
+            const signedTx = await this.wallet.signTransaction(tx);
+            const txHash = await this.provider.sendTransaction(signedTx);
+
+            console.log(`âœ… Transaction broadcasted: ${txHash.hash}`);
+            console.log(`   View: https://bscscan.com/tx/${txHash.hash}`);
+
+            // Wait for confirmation
+            const receipt = await txHash.wait();
+            
+            if (receipt.status === 1) {
+                console.log(`ðŸŽ‰ Transaction confirmed in block ${receipt.blockNumber}`);
+                return {
+                    success: true,
+                    hash: txHash.hash,
+                    receipt: receipt,
+                    gasUsed: receipt.gasUsed,
+                    effectiveGasPrice: receipt.effectiveGasPrice
+                };
+            } else {
+                throw new Error('Transaction reverted');
+            }
+
+        } catch (error) {
+            console.log(`âŒ Transaction attempt ${retryCount + 1} failed: ${error.message}`);
+            
+            if (retryCount < CONFIG.maxRetries - 1) {
+                console.log(`ðŸ”„ Retrying with higher gas price...`);
+                // Increase gas price for next retry
+                if (tx.gasPrice) {
+                    tx.gasPrice = tx.gasPrice.mul(Math.floor(CONFIG.gasPriceMultiplier * 1000)).div(1000);
+                }
+                return await this.signAndSendTransaction(tx, retryCount + 1);
+            }
+            
+            return {
+                success: false,
+                error: error.message,
+                attempts: retryCount + 1
+            };
         }
-
-        this.provider = new ethers.providers.JsonRpcProvider(CONFIG.rpcUrl);
-        this.signer = new ethers.Wallet(CONFIG.privateKey, this.provider);
-        this.flashloanContract = new ethers.Contract(CONFIG.flashloanContract, FLASHLOAN_ABI, this.signer);
-
-        // Initialize routers
-        this.routers = {};
-        for (const [name, config] of Object.entries(DEX_CONFIGS)) {
-            this.routers[name] = new ethers.Contract(config.router, ROUTER_ABI, this.signer);
-        }
-
-        console.log('🔄 Triangular Arbitrage Executor initialized');
-        console.log(`📍 Contract: ${CONFIG.flashloanContract}`);
-        console.log(`👤 Signer: ${this.signer.address}`);
     }
 
     async executeTriangularArbitrage(tokenA, tokenB, tokenC, expectedProfitUSD) {
         try {
-            console.log(`\n🎯 EXECUTING TRIANGULAR ARBITRAGE:`);
-            console.log(`   Path: ${tokenA.symbol} → ${tokenB.symbol} → ${tokenC.symbol} → ${tokenA.symbol}`);
-            console.log(`   Expected Profit: $${expectedProfitUSD.toFixed(2)}`);
+            console.log(`ðŸ”„ EXECUTING TRIANGULAR ARBITRAGE: ${tokenA} â†’ ${tokenB} â†’ ${tokenC} â†’ ${tokenA}`);
+            console.log(`ðŸ’° Expected Profit: $${expectedProfitUSD}`);
+            console.log('');
 
-            // Validate profit threshold
-            if (expectedProfitUSD < CONFIG.minProfitUSD) {
-                console.log(`❌ Profit too low: $${expectedProfitUSD.toFixed(2)} < $${CONFIG.minProfitUSD} minimum`);
-                return null;
-            }
+            // Get token addresses
+            const tokenAAddr = TOKENS[tokenA];
+            const tokenBAddr = TOKENS[tokenB];
+            const tokenCAddr = TOKENS[tokenC];
+            const tokenAAddrLoop = TOKENS[tokenA]; // Complete the triangle
 
-            // Check gas price
-            const gasPrice = await this.provider.getGasPrice();
-            const gasPriceGwei = parseFloat(ethers.utils.formatUnits(gasPrice, 'gwei'));
+            // Create path: tokenA -> tokenB -> tokenC -> tokenA
+            const path = [tokenAAddr, tokenBAddr, tokenCAddr, tokenAAddrLoop];
 
-            if (gasPriceGwei > CONFIG.maxGasPrice) {
-                console.log(`❌ Gas price too high: ${gasPriceGwei.toFixed(2)} gwei > ${CONFIG.maxGasPrice} gwei max`);
-                return null;
-            }
+            // Calculate optimal amount (start with 1 token for simplicity)
+            const amountIn = ethers.utils.parseEther('1');
 
-            // Calculate optimal trade size
-            const tradeSize = this.calculateOptimalTradeSize(expectedProfitUSD);
-            console.log(`💰 Trade size: ${ethers.utils.formatEther(tradeSize)} ${tokenA.symbol} ($${tradeSize.mul(500).div(ethers.utils.parseEther('1')).toNumber()})`);
-
-            // Find best router combination for triangular arbitrage
-            const routerCombo = await this.findBestRouterCombination(tokenA, tokenB, tokenC, tradeSize);
-
-            if (!routerCombo) {
-                console.log('❌ No suitable router combination found');
-                return null;
-            }
-
-            console.log(`🏦 Using routers: ${routerCombo.router1} → ${routerCombo.router2} → ${routerCombo.router3}`);
-
-            // Calculate minimum return (with slippage protection)
-            const minReturnA = tradeSize.mul(995).div(1000); // 0.5% slippage protection
-            const deadline = Math.floor(Date.now() / 1000) + 300; // 5 minutes
-
-            // Execute the triangular arbitrage via flashloan contract
-            console.log('⚡ Executing flashloan triangular arbitrage...');
-
-            const tx = await this.flashloanContract.executeTriArb(
-                tokenA.address,
-                tokenB.address,
-                tokenC.address,
-                tradeSize,
-                routerCombo.router1,
-                routerCombo.router2,
-                routerCombo.router3,
-                minReturnA,
-                deadline,
-                {
-                    gasLimit: 3000000, // High gas limit for complex arbitrage
-                    gasPrice: gasPrice
-                }
+            // Get expected output amount
+            const router = new ethers.Contract(
+                PANCAKE_ROUTER,
+                [
+                    'function getAmountsOut(uint amountIn, address[] memory path) external view returns (uint[] memory amounts)',
+                    'function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)'
+                ],
+                provider // Use provider instead of wallet for read operations
             );
 
-            console.log(`✅ Triangular arbitrage executed: ${tx.hash}`);
+            const amounts = await router.getAmountsOut(amountIn, path);
+            const expectedOutput = amounts[amounts.length - 1];
 
-            // Wait for confirmation
-            const receipt = await tx.wait();
-            console.log(`📊 Transaction confirmed in block ${receipt.blockNumber}`);
-            console.log(`⛽ Gas used: ${receipt.gasUsed.toString()}`);
+            // Calculate minimum output (account for slippage and fees)
+            const minOutput = expectedOutput.mul(995).div(1000); // 0.5% slippage
 
-            // Extract profit from transaction logs (if available)
-            const profit = this.extractProfitFromReceipt(receipt);
-            if (profit) {
-                console.log(`💰 Profit realized: $${profit.toFixed(2)}`);
-            }
+            console.log(`ðŸ“Š AMOUNT ANALYSIS:`);
+            console.log(`   Input: ${ethers.utils.formatEther(amountIn)} ${tokenA}`);
+            console.log(`   Expected Output: ${ethers.utils.formatEther(expectedOutput)} ${tokenA}`);
+            console.log(`   Minimum Output: ${ethers.utils.formatEther(minOutput)} ${tokenA}`);
+            console.log('');
 
-            return {
-                txHash: tx.hash,
-                blockNumber: receipt.blockNumber,
-                gasUsed: receipt.gasUsed,
-                profit: profit
+            // Prepare transaction with proper address formatting
+            const deadline = Math.floor(Date.now() / 1000) + 300; // 5 minutes
+            const tx = {
+                to: PANCAKE_ROUTER,
+                data: router.interface.encodeFunctionData('swapExactTokensForTokens', [
+                    amountIn,
+                    minOutput,
+                    path,
+                    wallet.address, // Use the properly formatted wallet address
+                    deadline
+                ]),
+                gasLimit: ethers.BigNumber.from('2000000'), // High gas limit for complex swap
+                gasPrice: await this.provider.getGasPrice()
             };
 
+            console.log(`âš¡ EXECUTING TRANSACTION WITH FORCED SIGNING...`);
+
+            // Execute transaction with forced signing
+            const result = await this.signAndSendTransaction(tx);
+
+            if (result.success) {
+                console.log('');
+                console.log('ðŸŽ¯ ARBITRAGE EXECUTION RESULT:');
+                console.log(`   Status: âœ… SUCCESS`);
+                console.log(`   Transaction Hash: ${result.hash}`);
+                console.log(`   Block: ${result.receipt.blockNumber}`);
+                console.log(`   Gas Used: ${result.gasUsed.toString()}`);
+                console.log(`   Effective Gas Price: ${ethers.utils.formatUnits(result.effectiveGasPrice, 'gwei')} gwei`);
+                
+                // Calculate profit in different tokens
+                const bnbPrice = 585; // Approximate BNB price
+                const profitBNB = parseFloat(ethers.utils.formatEther(expectedOutput.sub(amountIn)));
+                const profitUSD = profitBNB * bnbPrice;
+                
+                console.log('');
+                console.log('ðŸ’° PROFIT ANALYSIS:');
+                console.log(`   Raw Profit: ${profitBNB.toFixed(6)} ${tokenA}`);
+                console.log(`   USD Value: ~$${profitUSD.toFixed(2)}`);
+                console.log(`   Expected: $${expectedProfitUSD}`);
+                
+                // Prepare profit distribution data
+                const profitAssets = {
+                    'BNB': Math.round(profitBNB * 0.8 * 1000000) / 1000000, // 80% in BNB
+                    'USDT': Math.round(profitUSD * 0.2 * 100) / 100  // 20% in USDT
+                };
+                
+                console.log('');
+                console.log('ðŸ“¤ PROFIT DISTRIBUTION PREPARED:');
+                console.log(`   BNB: ${profitAssets.BNB}`);
+                console.log(`   USDT: ${profitAssets.USDT}`);
+                console.log('');
+                console.log(`âœ… ARBITRAGE EXECUTED SUCCESSFULLY!`);
+                console.log(`Tx Hash: ${result.hash}`);
+                
+                return {
+                    success: true,
+                    hash: result.hash,
+                    profit: profitUSD,
+                    profitAssets: profitAssets,
+                    gasUsed: result.gasUsed.toString(),
+                    blockNumber: result.receipt.blockNumber
+                };
+            } else {
+                console.log('');
+                console.log('âŒ ARBITRAGE EXECUTION FAILED:');
+                console.log(`   Error: ${result.error}`);
+                console.log(`   Attempts: ${result.attempts}`);
+                return {
+                    success: false,
+                    error: result.error,
+                    attempts: result.attempts
+                };
+            }
+
         } catch (error) {
-            console.error('❌ Triangular arbitrage execution failed:', error.message);
-            return null;
-        }
-    }
-
-    calculateOptimalTradeSize(expectedProfitUSD) {
-        // Scale trade size based on profit potential
-        // Higher profit potential = larger trade size
-        const baseSize = ethers.utils.parseEther('1'); // 1 WBNB base
-
-        if (expectedProfitUSD > 100) {
-            return baseSize.mul(5); // 5x for very profitable opportunities
-        } else if (expectedProfitUSD > 50) {
-            return baseSize.mul(3); // 3x for good opportunities
-        } else if (expectedProfitUSD > 25) {
-            return baseSize.mul(2); // 2x for moderate opportunities
-        }
-
-        return baseSize; // 1x for minimum profitable opportunities
-    }
-
-    async findBestRouterCombination(tokenA, tokenB, tokenC, amountIn) {
-        // Test different router combinations to find the most profitable path
-        const routerNames = Object.keys(this.routers);
-        let bestCombo = null;
-        let bestOutput = ethers.constants.Zero;
-
-        for (let i = 0; i < routerNames.length; i++) {
-            for (let j = 0; j < routerNames.length; j++) {
-                for (let k = 0; k < routerNames.length; k++) {
-                    try {
-                        const router1 = routerNames[i];
-                        const router2 = routerNames[j];
-                        const router3 = routerNames[k];
-
-                        // Calculate A → B → C → A output
-                        const amountsAB = await this.routers[router1].getAmountsOut(amountIn, [tokenA.address, tokenB.address]);
-                        const amountsBC = await this.routers[router2].getAmountsOut(amountsAB[1], [tokenB.address, tokenC.address]);
-                        const amountsCA = await this.routers[router3].getAmountsOut(amountsBC[1], [tokenC.address, tokenA.address]);
-
-                        const finalOutput = amountsCA[1];
-
-                        if (finalOutput.gt(bestOutput)) {
-                            bestOutput = finalOutput;
-                            bestCombo = {
-                                router1,
-                                router2,
-                                router3,
-                                expectedOutput: finalOutput
-                            };
-                        }
-                    } catch (error) {
-                        // Skip invalid combinations
-                        continue;
-                    }
-                }
-            }
-        }
-
-        return bestCombo;
-    }
-
-    extractProfitFromReceipt(receipt) {
-        // Extract profit from transaction logs (simplified)
-        // In a real implementation, you'd parse the contract events
-        try {
-            // Look for TriArbExecuted event or similar
-            for (const log of receipt.logs) {
-                // Parse profit from event logs if available
-                // This is a placeholder - actual implementation would decode events
-            }
-
-            // Fallback: estimate profit based on gas costs vs expected profit
-            // This is not accurate but provides a basic estimate
-            return null; // Return null if can't determine exact profit
-        } catch (error) {
-            return null;
-        }
-    }
-
-    async monitorAndExecute() {
-        console.log('👀 Starting triangular arbitrage monitor...');
-
-        // This would integrate with the Python scanner
-        // For now, it's a placeholder that could be called when opportunities are found
-
-        while (true) {
-            try {
-                // Wait for opportunities from the scanner
-                // In production, this would listen for events or API calls from the scanner
-
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Check every second
-
-            } catch (error) {
-                console.error('Monitor error:', error.message);
-                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds on error
-            }
+            console.error('âŒ Arbitrage execution failed:', error.message);
+            return {
+                success: false,
+                error: error.message
+            };
         }
     }
 }
 
-// Export for use in other modules
-module.exports = TriangularArbitrageExecutor;
-
-// CLI execution
-if (require.main === module) {
-    const args = process.argv.slice(2);
-
-    if (args.length === 0) {
-        console.log('Triangular Arbitrage Executor');
-        console.log('Usage: node execute_triangular_arb.js <tokenA> <tokenB> <tokenC> <expectedProfitUSD>');
-        console.log('Example: node execute_triangular_arb.js WBNB CAKE BTCB 25.50');
-        process.exit(1);
-    }
-
-    if (args[0] === '--monitor') {
-        // Start monitoring mode
-        const executor = new TriangularArbitrageExecutor();
-        executor.monitorAndExecute().catch(console.error);
-    } else if (args.length >= 4) {
-        // Execute specific arbitrage
-        const [tokenASymbol, tokenBSymbol, tokenCSymbol, profitStr] = args;
-        const expectedProfit = parseFloat(profitStr);
-
-        const executor = new TriangularArbitrageExecutor();
-
-        // Get token objects
-        const tokenA = TOKENS[tokenASymbol.toUpperCase()];
-        const tokenB = TOKENS[tokenBSymbol.toUpperCase()];
-        const tokenC = TOKENS[tokenCSymbol.toUpperCase()];
-
-        if (!tokenA || !tokenB || !tokenC) {
-            console.error('Invalid token symbols. Available:', Object.keys(TOKENS).join(', '));
+async function main() {
+    try {
+        // Check command line arguments
+        const args = process.argv.slice(2);
+        if (args.length < 4) {
+            console.log('âŒ Usage: node execute_triangular_arb.js <tokenA> <tokenB> <tokenC> <expectedProfitUSD> [--forced-signing]');
+            console.log('Example: node execute_triangular_arb.js WBNB CAKE BTCB 45.50 --forced-signing');
             process.exit(1);
         }
 
-        executor.executeTriangularArbitrage(tokenA, tokenB, tokenC, expectedProfit)
-            .then(result => {
-                if (result) {
-                    console.log('✅ Arbitrage executed successfully!');
-                    console.log(`   Tx Hash: ${result.txHash}`);
-                    process.exit(0);
-                } else {
-                    console.log('❌ Arbitrage execution failed or not profitable');
-                    process.exit(1);
-                }
-            })
-            .catch(error => {
-                console.error('Execution error:', error);
-                process.exit(1);
-            });
-    } else {
-        console.log('Invalid arguments. Use --help for usage information.');
+        const [tokenA, tokenB, tokenC, expectedProfitUSD] = args.slice(0, 4);
+
+        // Validate tokens
+        if (!TOKENS[tokenA] || !TOKENS[tokenB] || !TOKENS[tokenC]) {
+            console.log('âŒ Invalid token(s). Available tokens:', Object.keys(TOKENS).join(', '));
+            process.exit(1);
+        }
+
+        console.log(`ðŸŽ¯ Target: ${tokenA} â†’ ${tokenB} â†’ ${tokenC} â†’ ${tokenA}`);
+        console.log('');
+
+        // Initialize executor
+        const executor = new ForcedSigningExecutor();
+
+        // Check wallet balance
+        const balance = await provider.getBalance(wallet.address);
+        console.log(`ðŸ’° Wallet Balance: ${ethers.utils.formatEther(balance)} BNB`);
+        console.log(`   USD Value: ~${parseFloat(ethers.utils.formatEther(balance)) * 585}`);
+        console.log(`   Wallet Address: ${wallet.address}`);
+        console.log('');
+
+        if (balance.lt(ethers.utils.parseEther('0.01'))) {
+            console.log('âŒ Insufficient BNB balance for gas fees');
+            process.exit(1);
+        }
+
+        // Execute triangular arbitrage
+        const result = await executor.executeTriangularArbitrage(tokenA, tokenB, tokenC, parseFloat(expectedProfitUSD));
+
+        // Exit with appropriate code
+        if (result.success) {
+            console.log('');
+            console.log('ðŸŽ‰ TRIANGULAR ARBITRAGE COMPLETED SUCCESSFULLY');
+            process.exit(0);
+        } else {
+            console.log('');
+            console.log('ðŸ’¥ TRIANGULAR ARBITRAGE FAILED');
+            process.exit(1);
+        }
+
+    } catch (error) {
+        console.error('ðŸ’¥ Fatal error:', error);
         process.exit(1);
     }
 }
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+    console.error('ðŸ’¥ Uncaught Exception:', error.message);
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('ðŸ’¥ Unhandled Rejection:', reason);
+    process.exit(1);
+});
+
+// Run if called directly
+if (require.main === module) {
+    main();
+}
+
+module.exports = { ForcedSigningExecutor };
